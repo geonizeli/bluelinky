@@ -23,7 +23,7 @@ import {
   VehicleWindowsOptions,
 } from '../interfaces/common.interfaces';
 
-import got from 'got';
+import got, { GotInstance, GotJSONFn } from 'got';
 import { BrazilianController } from '../controllers/brazilian.controller';
 import {
   EUDatedDriveHistory,
@@ -33,7 +33,7 @@ import {
 } from '../interfaces/european.interfaces';
 import logger from '../logger';
 import { ManagedBluelinkyError, manageBluelinkyError } from '../tools/common.tools';
-import { addMinutes, celciusToTempCode, parseDate, tempCodeToCelsius } from '../util';
+import { addMinutes, celciusToTempCode, parseDate } from '../util';
 import { Vehicle } from './vehicle';
 
 export default class BrazilianVehicle extends Vehicle {
@@ -109,6 +109,7 @@ export default class BrazilianVehicle extends Vehicle {
     try {
       const response = this.updateRates(
         await http.post(`/api/v2/spa/vehicles/${this.vehicleConfig.id}/control/door`, {
+          headers: this.controlRequestHeaders(),
           body: {
             action: 'close',
             deviceId: this.controller.session.deviceId,
@@ -130,6 +131,7 @@ export default class BrazilianVehicle extends Vehicle {
     try {
       const response = this.updateRates(
         await http.post(`/api/v2/spa/vehicles/${this.vehicleConfig.id}/control/door`, {
+          headers: this.controlRequestHeaders(),
           body: {
             action: 'open',
             deviceId: this.controller.session.deviceId,
@@ -168,27 +170,25 @@ export default class BrazilianVehicle extends Vehicle {
       ...input,
     };
 
-    const http = await this.controller.getVehicleHttpService();
     const apiClient = await this.controller.getApiHttpService();
 
     try {
-      const vehicleStatusResponse = this.updateRates(
+      const vehicleStatus = await this.fetchCcs2VehicleState(
+        apiClient,
         statusConfig.refresh
-          ? await http.get(`/api/v2/spa/vehicles/${this.vehicleConfig.id}/status/latest`)
-          : await http.get(`/api/v2/spa/vehicles/${this.vehicleConfig.id}/status`)
       );
-      const locationResponse = this.updateRates(
-        await apiClient.get(`/api/v1/spa/vehicles/${this.vehicleConfig.id}/location/park`)
-      );
-      const odometer = await this.odometer();
+      const odometer = vehicleStatus?.Drivetrain?.Odometer
+        ? (vehicleStatus.Drivetrain.Odometer as VehicleOdometer)
+        : await this.odometer();
+
       if (!odometer) {
         return null;
       }
 
       this._fullStatus = {
-        vehicleLocation: locationResponse.body.resMsg?.gpsDetail || locationResponse.body.resMsg,
+        vehicleLocation: vehicleStatus?.Location ?? vehicleStatus?.Green?.Location,
         odometer,
-        vehicleStatus: vehicleStatusResponse.body.resMsg,
+        vehicleStatus,
       };
       return this._fullStatus;
     } catch (err) {
@@ -204,69 +204,11 @@ export default class BrazilianVehicle extends Vehicle {
       ...input,
     };
 
-    const http = await this.controller.getVehicleHttpService();
+    const http = await this.controller.getApiHttpService();
 
     try {
-      const cacheString = statusConfig.refresh ? '' : '/latest';
-      const response = this.updateRates(
-        await http.get(`/api/v2/spa/vehicles/${this.vehicleConfig.id}/status${cacheString}`)
-      );
-      const vehicleStatus = response.body.resMsg;
-
-      const parsedStatus: VehicleStatus = {
-        chassis: {
-          hoodOpen: vehicleStatus?.hoodOpen,
-          trunkOpen: vehicleStatus?.trunkOpen,
-          locked: vehicleStatus.doorLock,
-          openDoors: {
-            frontRight: !!vehicleStatus?.doorOpen?.frontRight,
-            frontLeft: !!vehicleStatus?.doorOpen?.frontLeft,
-            backLeft: !!vehicleStatus?.doorOpen?.backLeft,
-            backRight: !!vehicleStatus?.doorOpen?.backRight,
-          },
-          tirePressureWarningLamp: {
-            rearLeft: !!vehicleStatus?.tirePressureLamp?.tirePressureLampRL,
-            frontLeft: !!vehicleStatus?.tirePressureLamp?.tirePressureLampFL,
-            frontRight: !!vehicleStatus?.tirePressureLamp?.tirePressureLampFR,
-            rearRight: !!vehicleStatus?.tirePressureLamp?.tirePressureLampRR,
-            all: !!vehicleStatus?.tirePressureLamp?.tirePressureWarningLampAll,
-          },
-        },
-        climate: {
-          active: vehicleStatus?.airCtrlOn,
-          steeringwheelHeat: !!vehicleStatus?.steerWheelHeat,
-          sideMirrorHeat: false,
-          rearWindowHeat: !!vehicleStatus?.sideBackWindowHeat,
-          defrost: vehicleStatus?.defrost,
-          temperatureSetpoint: tempCodeToCelsius(REGIONS.BR, vehicleStatus?.airTemp?.value),
-          temperatureUnit: vehicleStatus?.airTemp?.unit,
-        },
-        engine: {
-          ignition: vehicleStatus.engine,
-          accessory: vehicleStatus?.acc,
-          rangeGas:
-            vehicleStatus?.evStatus?.drvDistance[0]?.rangeByFuel?.gasModeRange?.value ??
-            vehicleStatus?.dte?.value,
-          range: vehicleStatus?.evStatus?.drvDistance[0]?.rangeByFuel?.totalAvailableRange?.value,
-          rangeEV: vehicleStatus?.evStatus?.drvDistance[0]?.rangeByFuel?.evModeRange?.value,
-          plugedTo: vehicleStatus?.evStatus?.batteryPlugin ?? EVPlugTypes.UNPLUGED,
-          charging: vehicleStatus?.evStatus?.batteryCharge,
-          estimatedCurrentChargeDuration: vehicleStatus?.evStatus?.remainTime2?.atc?.value,
-          estimatedFastChargeDuration: vehicleStatus?.evStatus?.remainTime2?.etc1?.value,
-          estimatedPortableChargeDuration: vehicleStatus?.evStatus?.remainTime2?.etc2?.value,
-          estimatedStationChargeDuration: vehicleStatus?.evStatus?.remainTime2?.etc3?.value,
-          batteryCharge12v: vehicleStatus?.battery?.batSoc,
-          batteryChargeHV: vehicleStatus?.evStatus?.batteryStatus,
-        },
-        lastupdate: vehicleStatus?.time ? parseDate(vehicleStatus?.time) : null,
-      };
-
-      if (!parsedStatus.engine.range) {
-        if (parsedStatus.engine.rangeEV || parsedStatus.engine.rangeGas) {
-          parsedStatus.engine.range =
-            (parsedStatus.engine.rangeEV ?? 0) + (parsedStatus.engine.rangeGas ?? 0);
-        }
-      }
+      const vehicleStatus = await this.fetchCcs2VehicleState(http, statusConfig.refresh);
+      const parsedStatus = this.parseCcs2VehicleStatus(vehicleStatus);
 
       this._status = statusConfig.parsed ? parsedStatus : vehicleStatus;
 
@@ -277,23 +219,19 @@ export default class BrazilianVehicle extends Vehicle {
   }
 
   public async odometer(): Promise<VehicleOdometer | null> {
-    const http = await this.controller.getVehicleHttpService();
+    const http = await this.controller.getApiHttpService();
     try {
       const response = this.updateRates(
-        await http.post(`/api/v2/spa/vehicles/${this.vehicleConfig.id}/monthlyreport`, {
-          body: {
-            setRptMonth: toMonthDate({
-              year: new Date().getFullYear(),
-              month: new Date().getMonth() + 1,
-            }),
-          },
-        })
+        await http.get(
+          `/api/v1/spa/vehicles/${this.vehicleConfig.id}/ccs2/carstatus/latest`
+        )
       );
-      this._odometer = {
-        unit: 0,
-        value: response.body.resMsg?.odometer,
-      };
-      return this._odometer;
+      const odometer = response.body.resMsg?.state?.Vehicle?.Drivetrain?.Odometer;
+      if (odometer) {
+        this._odometer = odometer as VehicleOdometer;
+        return this._odometer;
+      }
+      return null;
     } catch (err) {
       throw manageBluelinkyError(err, 'BrazilVehicle.odometer');
     }
@@ -620,6 +558,97 @@ export default class BrazilianVehicle extends Vehicle {
     } catch (err) {
       throw manageBluelinkyError(err, 'BrazilVehicle.setNavigation');
     }
+  }
+
+  private ccs2StatusPath(suffix: string): string {
+    return `/api/v1/spa/vehicles/${this.vehicleConfig.id}/ccs2/carstatus${suffix}`;
+  }
+
+  private async fetchCcs2VehicleState(
+    http: GotInstance<GotJSONFn>,
+    refresh: boolean
+  ): Promise<RawVehicleStatus> {
+    if (refresh) {
+      this.updateRates(await http.get(this.ccs2StatusPath('')));
+      await new Promise(resolve => setTimeout(resolve, 15000));
+    }
+
+    const response = this.updateRates(await http.get(this.ccs2StatusPath('/latest')));
+    return response.body.resMsg.state.Vehicle;
+  }
+
+  private parseCcs2VehicleStatus(vehicleStatus: RawVehicleStatus): VehicleStatus {
+    const locks = [
+      !!vehicleStatus?.Cabin?.Door?.Row1?.Passenger?.Lock,
+      !!vehicleStatus?.Cabin?.Door?.Row1?.Driver?.Lock,
+      !!vehicleStatus?.Cabin?.Door?.Row2?.Left?.Lock,
+      !!vehicleStatus?.Cabin?.Door?.Row2?.Right?.Lock,
+    ];
+
+    let plugedTo: EVPlugTypes;
+    if (vehicleStatus?.Green?.ChargingInformation?.ConnectorFastening?.State) {
+      plugedTo = EVPlugTypes.STATION;
+    } else {
+      plugedTo = EVPlugTypes.UNPLUGED;
+    }
+
+    return {
+      chassis: {
+        hoodOpen: !!vehicleStatus?.Body?.Hood?.Open,
+        trunkOpen: !!vehicleStatus?.Body?.Trunk?.Open,
+        locked: locks.every(v => v === false),
+        openDoors: {
+          frontRight: !!vehicleStatus?.Cabin?.Door?.Row1?.Passenger?.Open,
+          frontLeft: !!vehicleStatus?.Cabin?.Door?.Row1?.Driver?.Open,
+          backLeft: !!vehicleStatus?.Cabin?.Door?.Row2?.Left?.Open,
+          backRight: !!vehicleStatus?.Cabin?.Door?.Row2?.Right?.Open,
+        },
+        tirePressureWarningLamp: {
+          rearLeft: !!vehicleStatus?.Chassis?.Axle?.Row2?.Left?.Tire?.PressureLow,
+          frontLeft: !!vehicleStatus?.Chassis?.Axle?.Row1?.Left?.Tire?.PressureLow,
+          frontRight: !!vehicleStatus?.Chassis?.Axle?.Row1?.Right?.Tire?.PressureLow,
+          rearRight: !!vehicleStatus?.Chassis?.Axle?.Row2?.Right?.Tire?.PressureLow,
+          all: !!vehicleStatus?.Chassis?.Axle?.Tire?.PressureLow,
+        },
+      },
+      climate: {
+        active: vehicleStatus?.Cabin?.HVAC?.Row1?.Driver?.Temperature?.Value === 'ON',
+        steeringwheelHeat: !!vehicleStatus?.Cabin?.SteeringWheel?.Heat?.State,
+        sideMirrorHeat: false,
+        rearWindowHeat: false,
+        defrost: false,
+        temperatureSetpoint: '',
+        temperatureUnit: 0,
+      },
+      engine: {
+        ignition:
+          !!vehicleStatus?.Electronics?.PowerSupply?.Ignition1 ||
+          !!vehicleStatus?.Electronics?.PowerSupply?.Ignition3,
+        accessory: !!vehicleStatus?.Electronics?.PowerSupply?.Accessory,
+        rangeGas: vehicleStatus?.Drivetrain?.FuelSystem?.DTE?.Gas,
+        range: vehicleStatus?.Drivetrain?.FuelSystem?.DTE?.Total,
+        rangeEV: vehicleStatus?.Drivetrain?.FuelSystem?.DTE?.EV,
+        plugedTo: plugedTo,
+        charging: undefined,
+        estimatedCurrentChargeDuration:
+          vehicleStatus?.Green?.ChargingInformation?.Charging?.RemainTime,
+        estimatedFastChargeDuration:
+          vehicleStatus?.Green?.ChargingInformation?.EstimatedTime?.Quick,
+        estimatedPortableChargeDuration:
+          vehicleStatus?.Green?.ChargingInformation?.EstimatedTime?.ICCB,
+        estimatedStationChargeDuration:
+          vehicleStatus?.Green?.ChargingInformation?.EstimatedTime?.Standard,
+        batteryCharge12v: vehicleStatus?.Electronics?.Battery?.Level,
+        batteryChargeHV: vehicleStatus?.Green?.BatteryManagement?.BatteryRemain?.Ratio,
+      },
+      lastupdate: vehicleStatus?.Date ? parseDate(vehicleStatus?.Date) : null,
+    };
+  }
+
+  private controlRequestHeaders() {
+    return {
+      ccuCCS2ProtocolSupport: this.vehicleConfig.ccuCCS2ProtocolSupport ? '1' : '0',
+    };
   }
 
   private updateRates<T extends Record<string, unknown>>(resp: got.Response<T>): got.Response<T> {

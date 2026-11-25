@@ -52,7 +52,9 @@ export class BrazilianController extends SessionController<BrazilianBlueLinkyCon
       'User-Agent':
         'BR_BlueLink/1.0.14 (com.hyundai.bluelink.br; build:10132; iOS 26.5.0) Alamofire/5.9.1',
       'Content-Type': 'application/json; charset=UTF-8',
-      'Offset': (new Date().getTimezoneOffset() / 60).toFixed(2),
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'pt-BR;q=1.0, en-US;q=0.9',
+      'offset': '-3',
     };
   }
 
@@ -178,7 +180,7 @@ export class BrazilianController extends SessionController<BrazilianBlueLinkyCon
 
     const formData = new URLSearchParams();
     formData.append('grant_type', 'refresh_token');
-    formData.append('redirect_uri', 'https://br-ccapi.hyundai.com.br/api/v1/user/oauth2/redirect');
+    formData.append('client_id', this.environment.clientId);
     formData.append('refresh_token', this.session.refreshToken);
 
     try {
@@ -221,7 +223,7 @@ export class BrazilianController extends SessionController<BrazilianBlueLinkyCon
         },
         body: {
           deviceId: this.session.deviceId,
-          pin: this.userConfig.pin,
+          pin: String(this.userConfig.pin),
         },
         json: true,
       });
@@ -274,8 +276,10 @@ export class BrazilianController extends SessionController<BrazilianBlueLinkyCon
             regDate: v.regDate,
             brandIndicator: 'H',
             id: v.vehicleId,
-            vin: vehicleProfile.vinInfo[0].basic.vin,
-            generation: vehicleProfile.vinInfo[0].basic.modelYear,
+            vin: vehicleProfile.vinInfo?.[0]?.basic?.vin,
+            generation: vehicleProfile.vinInfo?.[0]?.basic?.modelYear,
+            ccuCCS2ProtocolSupport:
+              v.ccuCCS2ProtocolSupport === 1 || v.ccuCCS2ProtocolSupport === true,
           } as VehicleRegisterOptions;
 
           return new BrazilianVehicle(vehicleConfig, this);
